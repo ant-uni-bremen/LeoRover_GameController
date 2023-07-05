@@ -122,11 +122,12 @@ def main(args=None):
     rclpy.init()
     joystick = XboxController()
 
-    minimal_publisher = VelocityPublisher(joystick)
+    velocity_publisher = VelocityPublisher(joystick)
+    joystick.connectPublisher(velocity_publisher)
 
-    rclpy.spin(minimal_publisher)
+    rclpy.spin(velocity_publisher)
 
-    minimal_publisher.destroy_node()
+    velocity_publisher.destroy_node()
     rclpy.shutdown()
 
 
