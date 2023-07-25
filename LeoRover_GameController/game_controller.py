@@ -3,6 +3,8 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
+from sensor_msgs.msg import NavSatFix
+
 from inputs import get_gamepad
 
 import math
@@ -93,36 +95,41 @@ class XboxController(object):
                 elif event.code == 'BTN_TRIGGER_HAPPY4':
                     self.DownDPad = event.state
             if self.publisher is not None:
-                self.publisher.publish()
+                self.publisher.sendCommand(-self.LeftJoystickY * 0.4, -self.LeftJoystickX * 1.)
 
 
 class VelocityPublisher(Node):
 
-    def __init__(self, joystick :XboxController):
-        super().__init__('velocity_publisher')
+    def __init__(self):
+        super().__init__('velocity_publisher') # type: ignore
         self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10)
         timer_period = 0.4  # seconds
         self.timer = self.create_timer(timer_period, self.timer_callback)
-        self.linear = 0.
-        self.angular = 0.
-        self.joystick :XboxController = joystick
+        self.last_linear = 0.   # for periodic publishing
+        self.last_angular = 0.  # for periodic publishing
 
-    def publish(self):
+    def _publish(self):
         msg = Twist()
-        msg.linear.x = float(-self.joystick.LeftJoystickY * .4)
-        msg.angular.z = float(-self.joystick.LeftJoystickX * 1.)
-        self.publisher_.publish(msg)
+        msg.linear.x = self.last_linear
+        msg.angular.z = self.last_angular
+        self.publisher_.publish(msg)       
         self.get_logger().info(f"Publishing to cmd_vel: {msg}")
 
+    def sendCommand(self, linear_x :float, angular_z :float):
+        self.last_linear = float(-linear_x * .4)
+        self.last_angular = float(-angular_z * 1.)
+        self.timer.reset()
+        self._publish()
+
     def timer_callback(self):
-        self.publish()
+        self._publish()
 
 
 def main(args=None):
     rclpy.init()
     joystick = XboxController()
 
-    velocity_publisher = VelocityPublisher(joystick)
+    velocity_publisher = VelocityPublisher()
     joystick.connectPublisher(velocity_publisher)
 
     rclpy.spin(velocity_publisher)
