@@ -2,7 +2,6 @@ from __future__ import annotations
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-
 from sensor_msgs.msg import NavSatFix
 
 from inputs import get_gamepad
@@ -10,6 +9,11 @@ from inputs import get_gamepad
 import math
 import threading
 import time
+import random
+from typing import List
+
+
+# ToDo: Right loss button debouncing
 
 
 class XboxController(object):
@@ -17,7 +21,6 @@ class XboxController(object):
     MAX_JOY_VAL = math.pow(2, 15)
 
     def __init__(self):
-
         self.LeftJoystickY = 0
         self.LeftJoystickX = 0
         self.RightJoystickY = 0
@@ -44,6 +47,8 @@ class XboxController(object):
         self._monitor_thread.start()
 
         self.publisher = None
+        self.last_lz = 0
+        self.last_rz = 0
 
     def connectPublisher(self, publisher :VelocityPublisher = None):
         self.publisher = publisher
@@ -52,28 +57,58 @@ class XboxController(object):
         while True:
             events = get_gamepad()
             for event in events:
+                # print(event.code)
+                sendCommand = False
                 if event.code == 'ABS_Y':
                     # print(f"{event.state} / {XboxController.MAX_JOY_VAL}")
                     # event.state = 0
                     self.LeftJoystickY = round(event.state / XboxController.MAX_JOY_VAL, 3) # normalize between -1 and 1
+                    sendCommand = True
                 elif event.code == 'ABS_X':
                     self.LeftJoystickX = round(event.state / XboxController.MAX_JOY_VAL, 3) # normalize between -1 and 1
+                    sendCommand = True
                 elif event.code == 'ABS_RY':
                     self.RightJoystickY = round(event.state / XboxController.MAX_JOY_VAL, 3) # normalize between -1 and 1
+                    sendCommand = True
                 elif event.code == 'ABS_RX':
                     self.RightJoystickX = round(event.state / XboxController.MAX_JOY_VAL, 3) # normalize between -1 and 1
+                    sendCommand = True
+
                 elif event.code == 'ABS_Z':
                     self.LeftTrigger = event.state / XboxController.MAX_TRIG_VAL # normalize between 0 and 1
+                    if self.LeftTrigger > .9:
+                        self.publisher.loss_rate = round( max(self.publisher.loss_rate - .1, 0), 1)
+                    self.last_lz = self.LeftTrigger
+                    print(f"New loss rate: {self.publisher.loss_rate}")
+                    
                 elif event.code == 'ABS_RZ':
                     self.RightTrigger = event.state / XboxController.MAX_TRIG_VAL # normalize between 0 and 1
+                    if self.RightTrigger > .9:
+                        self.publisher.loss_rate = round( min(self.publisher.loss_rate + .1, 1), 1)
+                    self.last_rz = self.RightTrigger
+                    print(f"New loss rate: {self.publisher.loss_rate}")
+
                 elif event.code == 'BTN_TL':
                     self.LeftBumper = event.state
+                    if self.LeftBumper:
+                        self.publisher.delay_s = max(self.publisher.delay_s - 0.1, 0)
+                    print(f"New delay: {self.publisher.delay_s}")
+
                 elif event.code == 'BTN_TR':
                     self.RightBumper = event.state
+                    if self.RightBumper:
+                        self.publisher.delay_s = min(self.publisher.delay_s + 0.1, 5)
+                    print(f"New delay: {self.publisher.delay_s}")
+
                 elif event.code == 'BTN_SOUTH':
                     self.A = event.state
                 elif event.code == 'BTN_NORTH':
                     self.Y = event.state #previously switched with X
+                    if self.Y:
+                        self.publisher.delay_s = 0
+                        self.publisher.loss_rate = 0
+                        self.publisher.nextCommands = []
+                        self.publisher.sendCommand(0., 0.)
                 elif event.code == 'BTN_WEST':
                     self.X = event.state #previously switched with Y
                 elif event.code == 'BTN_EAST':
@@ -94,32 +129,77 @@ class XboxController(object):
                     self.UpDPad = event.state
                 elif event.code == 'BTN_TRIGGER_HAPPY4':
                     self.DownDPad = event.state
-            if self.publisher is not None:
+            if sendCommand and self.publisher is not None:
                 self.publisher.sendCommand(-self.LeftJoystickY * 0.4, -self.LeftJoystickX * 1.)
 
 
+
 class VelocityPublisher(Node):
+
+    class DelayedCommand(dict):
+        def __init__(self):
+            self.linear = 0
+            self.angular = 0
+            self.timeToSend = 0     # ToDo: Maxbe switch to time.time_ns() ?
 
     def __init__(self):
         super().__init__('velocity_publisher') # type: ignore
         self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10)
         timer_period = 0.4  # seconds
-        self.timer = self.create_timer(timer_period, self.timer_callback)
+        self.keep_alive_timer = self.create_timer(timer_period, self.timer_callback)
+        self.send_timer = self.create_timer(10, self.send_timer_callback)
+        self.send_timer.cancel()
         self.last_linear = 0.   # for periodic publishing
         self.last_angular = 0.  # for periodic publishing
+        self.nextCommands :List[VelocityPublisher.DelayedCommand] = []
+        self.delay_s = 0
+        self.loss_rate = 0
+        
 
     def _publish(self):
         msg = Twist()
         msg.linear.x = self.last_linear
         msg.angular.z = self.last_angular
         self.publisher_.publish(msg)       
-        self.get_logger().info(f"Publishing to cmd_vel: {msg}")
+        # self.get_logger().info(f"Publishing to cmd_vel: {msg}")
+
 
     def sendCommand(self, linear_x :float, angular_z :float):
-        self.last_linear = float(-linear_x * .4)
-        self.last_angular = float(-angular_z * 1.)
-        self.timer.reset()
+
+        if random.random() < self.loss_rate:
+            print(f"Lost command: {linear_x, angular_z}")
+            return
+
+        print(f"SendCommand: {linear_x, angular_z}")
+        cmd = VelocityPublisher.DelayedCommand()
+        cmd.linear = float(linear_x)
+        cmd.angular = float(angular_z)
+        cmd.timeToSend = time.time() + self.delay_s
+
+        # ToDo: Sonderfall 0
+
+        self.nextCommands.append(cmd)
+
+        if len(self.nextCommands) == 1:     # Restart the timer to send that only queued command
+            self.send_timer.timer_period_ns = self.delay_s * 1e9
+            self.send_timer.reset()            
+
+
+    def send_timer_callback(self):
+        self.keep_alive_timer.reset()
+
+        print(f"Send timer callback")
+        cmd = self.nextCommands.pop(0)
+        self.last_angular = cmd.angular
+        self.last_linear = cmd.linear
         self._publish()
+        
+        if len(self.nextCommands) == 0:
+            self.send_timer.cancel()
+        else:
+            self.send_timer.timer_period_ns = (self.nextCommands[0].timeToSend - cmd.timeToSend) * 1e9
+            self.send_timer.reset()
+
 
     def timer_callback(self):
         self._publish()
