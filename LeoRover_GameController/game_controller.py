@@ -147,6 +147,24 @@ class XboxController(object):
                 self.publisher.sendCommand(-self.LeftJoystickY, -self.LeftJoystickX)
 
 
+class DelayInjector(Node):
+    def __init__(self):
+        super().__init__('delay_injector') # type: ignore
+        self.publisher = None
+        self.timer = self.create_timer(1., self.timer_callback)
+
+
+    def connectPublisher(self, publisher :VelocityPublisher = None):
+        self.publisher = publisher
+
+
+    def sendCommand(self, linear_x :float, angular_z :float):
+        self.publisher.sendCommand(linear_x, angular_z) # Currently no delay, just send the command to the real publisher
+
+
+    def timer_callback(self):
+        pass
+
 
 class VelocityPublisher(Node):
 
@@ -178,11 +196,18 @@ class VelocityPublisher(Node):
 def main(args=None):
     rclpy.init()
     joystick = XboxController()
-
+    delay_injector = DelayInjector()
     velocity_publisher = VelocityPublisher()
-    joystick.connectPublisher(velocity_publisher)
 
-    rclpy.spin(velocity_publisher)
+    delay_injector.connectPublisher(velocity_publisher)
+    joystick.connectPublisher(delay_injector)
+
+    executor = rclpy.executors.MultiThreadedExecutor()
+    executor.add_node(velocity_publisher)
+    executor.add_node(delay_injector)
+    executor.spin()
+
+    # rclpy.spin(velocity_publisher)
 
     velocity_publisher.destroy_node()
     rclpy.shutdown()
