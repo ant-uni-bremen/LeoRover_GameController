@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import List
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -40,7 +41,7 @@ class XboxController(object):
         self.UpDPad = 0
         self.DownDPad = 0
 
-        self.publisher = None
+        self.publisher :DelayInjector = None
         self.joystick_disconnected = False
 
         self._monitor_thread = threading.Thread(target=self._monitor_controller, args=())
@@ -121,12 +122,20 @@ class XboxController(object):
                     self.RightBumper = event.state
                 elif event.code == 'BTN_SOUTH':
                     self.A = event.state
+                    sendCommand = True
+                    if event.state == True:
+                        if self.publisher.delay_s >= 0:
+                            self.publisher.delay_s = self.publisher.delay_s - 0.1
                 elif event.code == 'BTN_NORTH':
                     self.Y = event.state #previously switched with X
                 elif event.code == 'BTN_WEST':
                     self.X = event.state #previously switched with Y
                 elif event.code == 'BTN_EAST':
                     self.B = event.state
+                    sendCommand = True
+                    if event.state == True:
+                        if self.publisher.delay_s <= 5:
+                            self.publisher.delay_s = self.publisher.delay_s + 0.1
                 elif event.code == 'BTN_THUMBL':
                     self.LeftThumb = event.state
                 elif event.code == 'BTN_THUMBR':
@@ -147,11 +156,26 @@ class XboxController(object):
                 self.publisher.sendCommand(-self.LeftJoystickY, -self.LeftJoystickX)
 
 
+class Command(dict):
+    def __init__(self):
+        self.linear :int = 0
+        self.angular :int = 0
+        self.timeToSend :int = 0  
+             
+
 class DelayInjector(Node):
     def __init__(self):
         super().__init__('delay_injector') # type: ignore
         self.publisher = None
-        self.timer = self.create_timer(1., self.timer_callback)
+        self.timer = self.create_timer(100., self.timer_callback)
+        self.timer.cancel()
+        self.timer_running = False
+        self.queue :List[Command]= []
+
+        self.delay_s :int = 0.5
+        self.delay_inc :int = 0
+        self.delay_dec :int = 0 
+        
 
 
     def connectPublisher(self, publisher :VelocityPublisher = None):
@@ -159,11 +183,32 @@ class DelayInjector(Node):
 
 
     def sendCommand(self, linear_x :float, angular_z :float):
-        self.publisher.sendCommand(linear_x, angular_z) # Currently no delay, just send the command to the real publisher
-
+        # self.publisher.sendCommand(linear_x, angular_z) # Currently no delay, just send the command to the real publisher
+        cmd = Command()
+        cmd.linear = linear_x
+        cmd.angular = angular_z
+        
+        cmd.timeToSend = time.time() + self.delay_s
+        
+        self.queue.append(cmd)
+        
+        if not self.timer_running:
+            self.timer.timer_period_ns = (cmd.timeToSend - time.time()) * 1000000000
+            self.timer.reset()
+            self.timer_running = True
+        
 
     def timer_callback(self):
-        pass
+        cmd = self.queue.pop(0)
+        self.publisher.sendCommand(cmd.linear, cmd.angular)
+        
+        if len(self.queue) == 0:
+            self.timer.cancel()
+            self.timer_running = False
+        else:
+            self.timer.timer_period_ns = (cmd.timeToSend - time.time()) * 1000000000
+            self.timer.reset()
+
 
 
 class VelocityPublisher(Node):
@@ -171,7 +216,7 @@ class VelocityPublisher(Node):
     def __init__(self):
         super().__init__('velocity_publisher') # type: ignore
         self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10)
-        timer_period = 10.4  # seconds
+        timer_period = 0.4  # seconds
         self.timer = self.create_timer(timer_period, self.timer_callback)
         self.last_linear = 0.   # for periodic publishing
         self.last_angular = 0.  # for periodic publishing
@@ -183,7 +228,7 @@ class VelocityPublisher(Node):
         self.publisher_.publish(msg)       
         self.get_logger().info(f"Publishing to cmd_vel: {msg}")
 
-    def sendCommand(self, linear_x :float, angular_z :float):
+    def sendCommand(self, linear_x :float, angular_z :float, ):
         self.last_linear = float(linear_x * .4)
         self.last_angular = float(angular_z * 1.)
         self.timer.reset()
