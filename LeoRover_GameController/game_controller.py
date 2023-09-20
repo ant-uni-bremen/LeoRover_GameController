@@ -6,7 +6,7 @@ from geometry_msgs.msg import Twist
 
 from sensor_msgs.msg import NavSatFix
 
-# from inputs import devices, get_gamepad, UnpluggedError
+from pyPS4Controller.controller import Controller
 
 import math
 import threading
@@ -14,55 +14,75 @@ import time
 import sys
 
 
+class PS4Controller(Controller):
+	def __init__(self, **kwargs):
+		Controller.__init__(self, **kwargs)
+		self.left_joystick_x = 0
+		self.left_joystick_y = 0
+		self.MAX_JOY_VAL = math.pow(2, 15)
 
-from pydualsense import pydualsense, TriggerModes
+		self.publisher = None
 
-
-class PS5_controller:
-	def __init__(self):
-		self.publisher :DelayInjector = None
-
-		self.dualsense = pydualsense()
-
-		self.dualsense.cross_pressed += self.on_cross_event
-		self.dualsense.circle_pressed += self.on_circle_event
-		self.dualsense.dpad_down += self.on_dpad_event
-		self.dualsense.left_joystick_changed += self.on_left_joystick_event
+		self._monitor_thread = threading.Thread(target=self._worker, args=())
+		self._monitor_thread.daemon = True
+		self._monitor_thread.start()
 
 
-	def init(self):
-		try:
-			self.dualsense.init()
-		except Exception as e:
-			if str(e) == "No device detected":
-				print("No Controller found! Plese check the bluetooth connection.")
-			else:
-				print(f"Unknown exception: {e}")
+	def _worker(self):
+		while True:
+			print(f"Trying to listen to PS4 controller")
+			self.listen()
+
 	
-
-	def is_R1_pressed(self):
-		return self.dualsense.state.R1
-
-
-	def close(self):
-		self.dualsense.close()
+	def connectPublisher(self, publisher :VelocityPublisher = None):
+		self.publisher = publisher
 
 
-	def on_cross_event(self, state):
-		print(f'cross {state}')
+	def on_x_press(self):
+		if self.publisher.delay_s >= 0:
+			self.publisher.delay_s = self.publisher.delay_s - 0.1
 
 
-	def on_circle_event(self, state):
-		print(f'circle {state}')
+	def on_circle_press(self):
+		if self.publisher.delay_s < 5:
+			self.publisher.delay_s = self.publisher.delay_s + 0.1
 
 
-	def on_dpad_event(self, state):
-		print(f'dpad {state}')
+	def on_x_release(self):
+		print("Goodbye world")
 
 
-	def on_left_joystick_event(self, stateX, stateY):
-		print(f'lj {stateX} {stateY}')
+	def on_L3_up(self, value):
+		self.left_joystick_y = round(value / self.MAX_JOY_VAL, 3)
+		if abs(self.left_joystick_y) < 0.05:
+			self.left_joystick_y = 0
+		self.on_control()
 
+		
+	def on_L3_down(self, value):
+		self.left_joystick_y = round(value / self.MAX_JOY_VAL, 3)
+		if abs(self.left_joystick_y) < 0.05:
+			self.left_joystick_y = 0
+		self.on_control()
+
+
+	def on_L3_left(self, value):
+		self.left_joystick_x = round(value / self.MAX_JOY_VAL, 3)
+		if abs(self.left_joystick_x) < 0.05:
+			self.left_joystick_x = 0
+		self.on_control()
+		
+		
+	def on_L3_right(self, value):
+		self.left_joystick_x = round(value / self.MAX_JOY_VAL, 3)
+		if abs(self.left_joystick_x) < 0.05:
+			self.left_joystick_x = 0
+		self.on_control()
+
+
+	def on_control(self):
+		if self.publisher is not None:
+			self.publisher.sendCommand(-self.left_joystick_y, -self.left_joystick_x)
 
 
 
@@ -224,7 +244,7 @@ class DelayInjector(Node):
 		self.timer_running = False
 		self.queue :List[Command]= []
 
-		self.delay_s :int = 0.5
+		self.delay_s :int = 0.0
 		self.delay_inc :int = 0
 		self.delay_dec :int = 0 
 		
@@ -273,6 +293,7 @@ class VelocityPublisher(Node):
 		self.last_linear = 0.   # for periodic publishing
 		self.last_angular = 0.  # for periodic publishing
 
+
 	def _publish(self):
 		msg = Twist()
 		msg.linear.x = self.last_linear
@@ -280,11 +301,13 @@ class VelocityPublisher(Node):
 		self.publisher_.publish(msg)       
 		self.get_logger().info(f"Publishing to cmd_vel: {msg}")
 
+
 	def sendCommand(self, linear_x :float, angular_z :float, ):
 		self.last_linear = float(linear_x * .4)
 		self.last_angular = float(angular_z * 1.)
 		self.timer.reset()
 		self._publish()
+
 
 	def timer_callback(self):
 		self._publish()
@@ -293,22 +316,13 @@ class VelocityPublisher(Node):
 def main(args=None):
 	rclpy.init()
 	# joystick = XboxController()
-	controller = PS5_controller()
-
-	controller.init()
-	while not controller.is_R1_pressed():
-		pass
-	print(f"Closing controller")
-	controller.close()
-	print(f"Exit")
-	return 0
-
+	controller = PS4Controller(interface="/dev/input/js0", connecting_using_ds4drv=False)
 
 	delay_injector = DelayInjector()
 	velocity_publisher = VelocityPublisher()
 
 	delay_injector.connectPublisher(velocity_publisher)
-	joystick.connectPublisher(delay_injector)
+	controller.connectPublisher(delay_injector)
 
 	executor = rclpy.executors.MultiThreadedExecutor()
 	executor.add_node(velocity_publisher)
